@@ -3,7 +3,7 @@
 A comprehensive implementation of LZW (Lempel-Ziv-Welch) compression in Python, with various dictionary management strategies.
 
 ## To-do
- - [ ] Eventually se if we're able to create LRU and LFU encoding by directing mirroring encoder logic somehow (this will make sense once you read the rest of the readme)
+ - [ ] Eventually see if we're able to create LRU and LFU encoding by directing mirroring encoder logic somehow (this will make sense once you read the rest of the readme)
 
 ## Table of Contents
 
