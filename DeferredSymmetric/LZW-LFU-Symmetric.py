@@ -6,12 +6,8 @@ Implements LZW compression with LFU (Least Frequently Used) eviction where
 the decoder maintains its own LFU tracker that perfectly mirrors the encoder's.
 No eviction signals are sent in the bitstream.
 
-Same deferred addition principle as the symmetric LRU version:
-- Both sides compute new entries as (prev_output + current_output[0])
-- Both sides add entries at the same logical point
-- Both sides perform identical LFU.use() operations in identical order
-- When dictionary is full, both independently evict the same LFU entry
-  (with LRU tie-breaking for entries at the same frequency)
+Same deferred addition principle as the symmetric LRU version, but evicts by
+frequency (with LRU tie-breaking) instead of pure recency.
 
 Bitstream: pure codewords + EOF. No EVICT_SIGNAL, no metadata.
 
@@ -85,10 +81,7 @@ class BitReader:
 K = TypeVar('K')
 
 class LFUTracker(Generic[K]):
-    """
-    O(1) LFU tracker using frequency buckets + doubly-linked lists.
-    Uses LRU tie-breaking for entries with the same frequency.
-    """
+    """O(1) LFU tracker with frequency buckets + LRU tie-breaking."""
     __slots__ = ('key_to_node', 'freq_to_list', 'min_freq')
 
     class Node:
@@ -169,32 +162,27 @@ class LFUTracker(Generic[K]):
 # ============================================================================
 # SHARED DICTIONARY MANAGEMENT
 # ============================================================================
+# Identical to LRU-Symmetric's dict_add_entry but calls find_lfu instead of find_lru.
 
 def dict_add_entry(fwd, rev, entry, next_code, max_code, lfu, code_bits, max_bits, threshold):
     """
     Add a new entry to the bidirectional dictionary.
     If full, evict LFU entry (with LRU tie-breaking) and reuse its code.
-
-    CRITICAL: Both encoder and decoder must call this with the same arguments
-    at the same logical step to maintain synchronization.
+    Both encoder and decoder must call this identically to stay in sync.
     """
-    # Skip if entry already exists — avoids wasting dictionary slots (O(1) check)
-    # Inherent issue with deferred addition: same entry could be added multiple times if it appears in multiple prev+current combinations.
     if entry in fwd:
         return next_code, code_bits, threshold
-    
+
     if next_code < max_code:
-        # Dictionary not full — add at next available code
         fwd[entry] = next_code
         rev[next_code] = entry
         lfu.use(entry)
         next_code += 1
-        # Check AFTER incrementing so code_bits is immediately correct
         if next_code >= threshold and code_bits < max_bits:
             code_bits += 1
             threshold <<= 1
     else:
-        # Dictionary FULL — evict LFU entry, reuse its code
+        # Evict least frequently used (LRU tie-breaking) instead of least recently used
         lfu_entry = lfu.find_lfu()
         if lfu_entry is not None:
             lfu_code = fwd[lfu_entry]
@@ -213,11 +201,6 @@ def dict_add_entry(fwd, rev, entry, next_code, max_code, lfu, code_bits, max_bit
 # ============================================================================
 
 def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
-    """
-    Compress using symmetric LZW-LFU with deferred addition.
-    Both sides add entries as prev_output + current_output[0] at the same step.
-    No EVICT_SIGNAL needed.
-    """
     alphabet = ALPHABETS[alphabet_name]
     valid_chars = set(alphabet)
 
@@ -233,7 +216,7 @@ def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
 
     EOF_CODE = len(alphabet)
     max_size = 1 << max_bits
-    max_code = max_size  # All codes usable (no EVICT_SIGNAL reserved)
+    max_code = max_size
     next_code = len(alphabet) + 1
 
     code_bits = min_bits
@@ -271,14 +254,11 @@ def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
             if combined in fwd:
                 current = combined
             else:
-                # Output code for current match
                 writer.write(fwd[current], code_bits)
 
-                # Mark as used in LFU (only tracked multi-char entries)
                 if lfu.contains(current):
                     lfu.use(current)
 
-                # Deferred addition: add entry from PREVIOUS step
                 if prev_output is not None:
                     entry = prev_output + current[0]
                     next_code, code_bits, threshold = dict_add_entry(
@@ -289,13 +269,11 @@ def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
                 prev_output = current
                 current = char
 
-    # Output final match
     writer.write(fwd[current], code_bits)
 
     if lfu.contains(current):
         lfu.use(current)
 
-    # Add deferred entry from previous step
     if prev_output is not None:
         entry = prev_output + current[0]
         next_code, code_bits, threshold = dict_add_entry(
@@ -303,7 +281,6 @@ def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
             lfu, code_bits, max_bits, threshold
         )
 
-    # Write EOF
     writer.write(EOF_CODE, code_bits)
     writer.close()
     print(f"Compressed: {input_file} -> {output_file}")
@@ -314,11 +291,7 @@ def compress(input_file, output_file, alphabet_name, min_bits=9, max_bits=16):
 # ============================================================================
 
 def decompress(input_file, output_file):
-    """
-    Decompress using symmetric LZW-LFU.
-    Decoder maintains its own LFU tracker, mirrors encoder exactly.
-    No EVICT_SIGNAL parsing needed.
-    """
+    """Decoder mirrors encoder's LFU state exactly via shared dict_add_entry."""
     reader = BitReader(input_file)
 
     min_bits = reader.read(8)
@@ -373,7 +346,6 @@ def decompress(input_file, output_file):
             if lfu.contains(current):
                 lfu.use(current)
 
-            # Deferred addition (identical to encoder)
             if prev_output is not None:
                 entry = prev_output + current[0]
                 next_code, code_bits, threshold = dict_add_entry(
@@ -388,7 +360,7 @@ def decompress(input_file, output_file):
 
 
 # ============================================================================
-# CLI
+# COMMAND-LINE INTERFACE
 # ============================================================================
 
 def main():
