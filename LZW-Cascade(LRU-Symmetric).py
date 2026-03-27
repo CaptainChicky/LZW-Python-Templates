@@ -155,7 +155,7 @@ def cascade_evict(entry, fwd, rev, lru, children_of, free_codes):
 
         # Push children onto stack before evicting this node
         if e in children_of:
-            for child in children_of.pop(e):
+            for child in sorted(children_of.pop(e)):
                 if child in fwd:
                     stack.append(child)
 
